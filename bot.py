@@ -22,7 +22,7 @@ SITE_URL = "http://mispg.svu.edu.eg/svu_pg/enquery.aspx"
 
 
 def run_dummy_server():
-    """خادم وهمي لإبقاء الخدمة Live على Render"""
+    """خادم ويب وهمي لإبقاء خدمة Render بحالة Live دائماً"""
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
     server.serve_forever()
@@ -30,99 +30,109 @@ def run_dummy_server():
 
 def fetch_expenses_from_site(national_id: str):
     session = requests.Session()
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        ),
-        "Accept-Language": "ar,en-US;q=0.7,en;q=0.3",
-        "Referer": SITE_URL,
-    }
-    session.headers.update(headers)
+    session.headers.update(
+        {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": SITE_URL,
+            "Origin": "http://mispg.svu.edu.eg",
+        }
+    )
 
     try:
-        # 1. طلب الصفحة الأولى للحصول على جميع المدخلات المخفية
+        # 1. طلب الصفحة لجلب الـ ViewState والحقول المخفية
         r1 = session.get(SITE_URL, timeout=15)
         soup = BeautifulSoup(r1.text, "html.parser")
 
         payload = {}
-        # جمع كل الحقول المخفية تلقائياً (VIEWSTATE, EVENTVALIDATION, إلخ)
         for inp in soup.find_all("input"):
             name = inp.get("name")
             val = inp.get("value", "")
             if name:
                 payload[name] = val
 
-        # تحديد اسم خانة الرقم القومي
-        text_inputs = soup.find_all("input", {"type": "text"})
+        # البحث عن حقل إدخال الرقم القومي الفعلي في الصفحة
         txt_name = None
-        for ti in text_inputs:
-            # الحقل إما اسمه فيه txt أو ID أو هو أول مربع نص
-            txt_name = ti.get("name")
-            break
+        for inp in soup.find_all("input", {"type": "text"}):
+            n = inp.get("name", "")
+            if "txt" in n.lower() or "national" in n.lower() or "id" in n.lower():
+                txt_name = n
+                break
+
+        # إذا لم يتم العثور عليه، نستخدم الافتراضي الخاص بالنظام
+        if not txt_name:
+            # البحث عن أي حقل نصي إن وجد
+            for inp in soup.find_all("input", {"type": "text"}):
+                txt_name = inp.get("name")
+                break
 
         if not txt_name:
-            txt_name = "ctl00$ContentPlaceHolder1$txtNationalId"
+            txt_name = "txtNationalId"
 
         payload[txt_name] = national_id
 
-        # تحديد زر البحث
-        submit_btn = soup.find("input", {"type": "submit"})
-        if submit_btn and submit_btn.get("name"):
-            payload[submit_btn.get("name")] = submit_btn.get("value", "استعلام")
+        # تحديد زر البحث أو الإرسال
+        submit_name = None
+        for inp in soup.find_all(["input", "button"], {"type": "submit"}):
+            n = inp.get("name")
+            if n:
+                submit_name = n
+                payload[n] = inp.get("value", "استعلام")
+                break
 
-        # 2. إرسال طلب البحث POST
+        if not submit_name:
+            payload["btnSearch"] = "استعلام"
+
+        # 2. إرسال طلب البحث (POST)
         r2 = session.post(SITE_URL, data=payload, timeout=20)
         res_soup = BeautifulSoup(r2.text, "html.parser")
 
-        # 3. استخراج النتيجة بدقة
-        # إذا كان الموقع يحتوي على رسالة خطأ واضحة
+        # 3. فحص الجداول والنصوص المسترجعة
         page_text = res_soup.get_text()
-
-        # إزالة الفراغات الزائدة
         cleaned_text = re.sub(r"\s+", " ", page_text).strip()
 
-        # البحث عن نصوص التقرير أو الجداول
+        # جمع النصوص الموجودة في الجداول (حيث تظهر بيانات النتيجة والرسوم)
         tables = res_soup.find_all("table")
-        valid_rows = []
+        extracted_data = []
+
         for table in tables:
-            for row in table.find_all("tr"):
-                txt = row.get_text(separator=" | ", strip=True)
-                # تصفية النصوص المهمة واستبعاد القوائم الفارغة
+            rows = table.find_all("tr")
+            for row in rows:
+                row_text = row.get_text(separator=" | ", strip=True)
                 if (
-                    txt
-                    and len(txt) > 5
-                    and "Report Viewer" not in txt
-                    and "javascript" not in txt
+                    row_text
+                    and len(row_text) > 3
+                    and "ReportViewer" not in row_text
+                    and "javascript" not in row_text
                 ):
-                    valid_rows.append(txt)
+                    extracted_data.append(row_text)
 
-        if valid_rows:
-            # استخراج أحدث صفوف تظهر بيانات الطالب والرسوم
-            result_summary = "\n".join(valid_rows[:12])
-            return result_summary
+        if len(extracted_data) > 1:
+            # ترتيل وتنسيق النتائج لتعرض للطالب بشكل مرتب
+            return "\n".join(extracted_data[:15])
 
-        # إذا لم نجد جداول مباشرة ولكن تم العثور على كلمات تدل على النتيجة
-        if "المصروفات" in cleaned_text or "الرسوم" in cleaned_text:
-            return "تم العثور على البيانات ولكن التقرير يتطلب مراجعة من المتصفح مباشرة."
+        # فحص إذا ظهرت رسالة خطأ أو تنبيه من النظام داخل الصفحة
+        if "غير مسجل" in cleaned_text or "خطأ" in cleaned_text:
+            return (
+                "عذراً، الرقم القومي غير مسجل أو لا توجد بيانات مرتبطة به في النظام."
+            )
 
         return (
-            "لم يتم العثور على بيانات مسجلة لهذا الرقم القومي.\n"
-            "تأكد أن الرقم القومي صحيح ومسجل بالدراسات العليا/الجامعة."
+            "تم إرسال الطلب بنظام الجامعة، ولكن لم يتم العثور على جدول تفصيلي"
+            " للرسوم لهذا الرقم.\nتأكد من صحة الرقم القومي."
         )
 
     except Exception as e:
-        return f"حدث خطأ أثناء الاتصال بالنظام: {str(e)}"
+        return f"حدث خطأ أثناء الاتصال بسيرفر الكلية: {str(e)}"
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text.strip()
     user = update.effective_user
 
-    # إرسال إشعار فوري في قناتك الخاصة أولاً
+    # إرسال السجل إلى قناتك الخاصة في السر
     log_text = (
         f"📥 **مدخل جديد في البوت:**\n"
         f"👤 **الاسم:** {user.full_name}\n"
@@ -138,23 +148,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
     except Exception as err:
-        print(f"Error sending log to channel: {err}")
+        print(f"Error logging to channel: {err}")
 
-    # التحقق من أن المدخل رقم قومي
+    # التحقق من أن المدخل مكون من 14 رقم (رقم قومي)
     if not user_input.isdigit() or len(user_input) != 14:
         await update.message.reply_text(
-            "يرجى كتابة الرقم القومي المكون من 14 رقماً فقط للاستعلام."
+            "يرجى إرسال الرقم القومي المكون من 14 رقماً بشكل صحيح للاستعلام."
         )
         return
 
-    await update.message.reply_text("جاري الاستعلام من موقع الجامعة...")
+    await update.message.reply_text("جاري فحص المصروفات من سيرفر الجامعة...")
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None, fetch_expenses_from_site, user_input
     )
 
-    await update.message.reply_text(f"📋 **النتيجة:**\n\n{result}")
+    await update.message.reply_text(f"📋 **نتيجة الاستعلام:**\n\n{result}")
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

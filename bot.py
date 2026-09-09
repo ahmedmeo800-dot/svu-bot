@@ -1,4 +1,7 @@
 import asyncio
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+import os
+import threading
 from bs4 import BeautifulSoup
 import requests
 from telegram import Update
@@ -10,11 +13,17 @@ from telegram.ext import (
     filters,
 )
 
-# ----------------- الإعدادات الخاصة بك -----------------
+# الإعدادات الخاصة بك
 BOT_TOKEN = "8812017814:AAFqVQodQbzR726hb_ENwzljnKvDtop08YQ"
 CHANNEL_ID = "-1004370577416"
 SITE_URL = "http://mispg.svu.edu.eg/svu_pg/enquery.aspx"
-# -------------------------------------------------------
+
+
+# سيرفر خفيف لإرضاء Render وجعله يتحول إلى Live فوراً
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    server.serve_forever()
 
 
 def fetch_expenses_from_site(national_id: str):
@@ -118,6 +127,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 if __name__ == "__main__":
+    # تشغيل سيرفر الويب في الخلفية ليتحول Render إلى Live
+    web_thread = threading.Thread(target=run_dummy_server, daemon=True)
+    web_thread.start()
+
+    # تشغيل البوت
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(
@@ -126,4 +140,3 @@ if __name__ == "__main__":
 
     print("البوت يعمل الآن ويتصل بالقناة...")
     app.run_polling()
-
